@@ -592,6 +592,7 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
             query.size = sizeof(query);
             query.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
             query.query_addr = cursor;
+            const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
             if (ioctl(fd, PROCMAP_QUERY, &query) == 0) {
                 if (query.vma_end <= cursor || query.vma_start >= query.vma_end) return false;
                 if (query.vma_start > cursor) {
@@ -601,8 +602,20 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
                     continue;
                 }
                 const bool readable = (query.vma_flags & PROCMAP_QUERY_VMA_READABLE) != 0;
+                const bool writable = readable && (query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) != 0;
+                if (readable) {
+                    const auto vmaEnd = static_cast<std::uintptr_t>(query.vma_end);
+                    for (PageSpan* span : {&pages.arena, &pages.image}) {
+                        if (span->size == 0 || vmaEnd <= span->base || cursor >= span->base + span->size) continue;
+                        const std::uint8_t value = PageReadable | (writable ? PageWritable : 0u);
+                        const auto first = std::max(cursor & ~static_cast<std::uintptr_t>(PageBytes - 1), span->base);
+                        const auto last = std::min({vmaEnd, span->base + span->size, (end + PageBytes - 1) & ~static_cast<std::uintptr_t>(PageBytes - 1)});
+                        for (auto at = first; at < last; at += PageBytes) span->store(at, value);
+                        if (last > first && GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(first, static_cast<std::size_t>(last - first));
+                    }
+                }
                 const auto next = std::min<std::uintptr_t>(end, query.vma_end);
-                if (!emit(PageRun{cursor, next, readable, readable && (query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) != 0})) return true;
+                if (!emit(PageRun{cursor, next, readable, writable})) return true;
                 cursor = next;
                 continue;
             }
